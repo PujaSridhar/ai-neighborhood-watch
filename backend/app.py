@@ -7,6 +7,7 @@ from flask import Flask, jsonify, request, send_file
 from flask_cors import CORS
 import psycopg2
 from dotenv import load_dotenv
+import snowflake.connector
 
 # Import Gemini SDK optionally so the app can run even if the package isn't installed
 # Prefer the newer `from google import genai` client if available; otherwise fall back to
@@ -43,6 +44,12 @@ except Exception:
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+SNOWFLAKE_ACCOUNT = os.getenv('SNOWFLAKE_ACCOUNT')
+SNOWFLAKE_USER = os.getenv('SNOWFLAKE_USER')
+SNOWFLAKE_PASSWORD = os.getenv('SNOWFLAKE_PASSWORD')
+SNOWFLAKE_WAREHOUSE = os.getenv('SNOWFLAKE_WAREHOUSE')
+SNOWFLAKE_DATABASE = os.getenv('SNOWFLAKE_DATABASE')
+SNOWFLAKE_SCHEMA = os.getenv('SNOWFLAKE_SCHEMA', 'PUBLIC')
 
 # Configure Gemini only if a key is provided and the SDK is available
 AI_ENABLED = False
@@ -129,6 +136,26 @@ def get_db_connection():
         print(f"!!! DATABASE CONNECTION ERROR: {e}")
         return None
 
+
+def get_snowflake_connection():
+    """Establish a connection to Snowflake using environment variables."""
+    if not SNOWFLAKE_ACCOUNT or not SNOWFLAKE_USER or not SNOWFLAKE_PASSWORD:
+        print('Snowflake credentials not fully configured; Snowflake disabled.')
+        return None
+    try:
+        ctx = snowflake.connector.connect(
+            user=SNOWFLAKE_USER,
+            password=SNOWFLAKE_PASSWORD,
+            account=SNOWFLAKE_ACCOUNT,
+            warehouse=SNOWFLAKE_WAREHOUSE,
+            database=SNOWFLAKE_DATABASE,
+            schema=SNOWFLAKE_SCHEMA
+        )
+        return ctx
+    except Exception as e:
+        print('Snowflake connection failed:', e)
+        return None
+
 # --- NEW: Podcast Feature Functions ---
 
 def fetch_todays_reports():
@@ -148,60 +175,185 @@ def fetch_todays_reports():
         if conn: conn.close()
 
 def generate_podcast_script(reports):
-    """Ask Gemini to create a short podcast script summarizing the reports."""
-    if not reports:
-        return "Good morning! It's been a quiet 24 hours in the neighborhood, with no new incidents reported. Remember to stay vigilant, and have a safe day."
+    """Generate a natural-sounding, conversational podcast script summarizing reports.
 
-    bullets = "\n".join([f"- {r['category']}: {r['description']}" for r in reports])
-    prompt = (
-        "You are a calm, friendly community radio host. Your tone is reassuring and informative. Create a 60-90 second morning briefing script summarizing the following neighborhood reports. "
-        "Start with a friendly greeting. State the total number of incidents. Briefly describe each one in a single sentence. Do not mention coordinates. "
-        "End with a short, positive safety tip. For example: 'Remember to lock your car doors' or 'Keep an eye out for your neighbors'.\n\n"
-        f"Reports ({len(reports)} total):\n{bullets}"
-    )
-    
+    The script is formatted as a short dialogue between two hosts to add variety and make
+    the audio feel more like a community podcast rather than a single monologue.
+    """
+    if not reports:
+        return (
+            "[Ava] Good morning, friends — it's a quiet day in our neighborhood. No new incidents reported in the last 24 hours. "
+            "Stay safe, check your locks, and look out for each other. Have a great day!"
+        )
+
+    # Convert reports into short sentences and ensure punctuation
+    report_lines = []
+    for r in reports:
+        cat = r.get('category') or 'Other'
+        desc = (r.get('description') or '').strip()
+        if desc and not desc.endswith(('.', '!', '?')):
+            desc += '.'
+        report_lines.append({'cat': cat, 'desc': desc})
+
+    # Compose an intentionally conversational dialogue where Ava (female) opens and leads,
+    # and Mateo (male) follows with short reactions, questions, and clarifications.
+    parts = []
+    parts.append("[Ava] Good morning — welcome to the Neighborhood Briefing. I'm Ava.")
+    parts.append("[Mateo] And I'm Mateo. Here are the highlights from the last 24 hours.")
+
+    for idx, item in enumerate(report_lines, start=1):
+        # Ava summarizes, Mateo reacts or asks a clarifying question
+        parts.append(f"[Ava] Report {idx}: {item['cat']}. {item['desc']}")
+        parts.append("[Mateo] That's concerning — do we know if anyone was hurt?")
+        parts.append("[Ava] Not reported; authorities were notified where appropriate.")
+
+    parts.append("[Mateo] Quick reminder: secure your vehicles and keep an eye on neighbors.")
+    parts.append("[Ava] Thanks for tuning in. We'll be back with another update tomorrow. Stay safe!")
+
+    script = '\n'.join(parts)
+
+    # If AI is available, ask Gemini to make the dialogue natural and conversational but keep the
+    # two-host structure (Ava=female, Mateo=male). Ask for concise phrasing suitable for an audio
+    # briefing (about 60-90 seconds).
     if not AI_ENABLED:
-        return "AI features are currently disabled. Unable to generate briefing."
+        return script
 
     try:
+        prompt = (
+            "You are an experienced radio editor. Rewrite the following dialogue to sound natural, "
+            "warm, and conversational for a short 60-90 second neighborhood podcast. Keep two hosts: "
+            "Ava (female, warm, reassuring) and Mateo (male, calm, curious). Keep exchanges brief and "
+            "make the hosts discuss the reports — do not invent new incidents. Output only the cleaned dialogue." 
+            "\n\nOriginal dialogue:\n" + script
+        )
+
         if GENAI_AVAILABLE and GENAI_NEW and genai_client:
             model_name = globals().get('MODEL_NAME') or 'gemini-2.0-flash'
             resp = genai_client.models.generate_content(model=model_name, contents=prompt)
             text = getattr(resp, 'text', None) or (resp.get('candidates')[0].get('content') if isinstance(resp, dict) and resp.get('candidates') else None)
-            return (text or '').strip()
+            return (text or script).strip()
         elif GENAI_AVAILABLE and not GENAI_NEW:
             m = genai.GenerativeModel('gemini-2.0-flash')
             resp = m.generate_content(prompt)
             return resp.text.strip()
     except Exception as e:
-        print('Gemini script generation failed:', e)
-        return "Unable to generate today's briefing due to an internal error."
+        print('Gemini script generation failed (fallback to local):', e)
+        return script
 
-def synthesize_audio_elevenlabs(script_text):
-    """Use ElevenLabs to synthesize audio (returns bytes of an mp3)."""
+def synthesize_audio_elevenlabs(script_text, reports=None):
+    """Synthesize multi-voice podcast using ElevenLabs.
+
+    Strategy:
+    - Split the script into short sentences.
+    - Synthesize each sentence (or small group) with alternating voices to emulate a multi-host podcast.
+    - Concatenate segments using pydub and return a single MP3 bytes buffer.
+
+    Falls back to single-voice synthesis if ElevenLabs or pydub is unavailable or an error occurs.
+    """
     if not ELEVEN_AVAILABLE or not os.getenv('ELEVENLABS_API_KEY'):
         print('ElevenLabs SDK not installed or API key not found; cannot synthesize audio.')
-        return None
+        return None, []
+
     try:
-        # Use the new client-based approach
         from elevenlabs.client import ElevenLabs
         client = ElevenLabs(api_key=os.getenv('ELEVENLABS_API_KEY'))
-        
-        print('Generating audio with ElevenLabs...')
-        audio = client.text_to_speech.convert(
-            text=script_text,
-            voice_id='21m00Tcm4TlvDq8ikWAM',  # Rachel voice
-            model_id='eleven_multilingual_v2'
-        )
-        
-        # Convert generator to bytes
-        audio_bytes = b''.join(audio)
-        print(f'Successfully generated {len(audio_bytes)} bytes of audio')
-        return audio_bytes
-        
     except Exception as e:
-        print('ElevenLabs synthesis failed:', e)
-        return None
+        print('Failed to create ElevenLabs client:', e)
+        return None, []
+
+    # Choose a small set of voice IDs to alternate between. These are common demo voices; if an ID
+    # isn't available to your account the ElevenLabs call will raise and we'll gracefully fallback.
+    # Map voice IDs to friendly display names
+    voice_map = [
+        ('21m00Tcm4TlvDq8ikWAM', 'Ava'),  # warm host
+        ('EXAVITQu4vr4xnSDxMaL', 'Mateo')  # co-host
+    ]
+    voice_ids = [v[0] for v in voice_map]
+
+
+    # Helper: single-segment synthesis
+    def synth_segment(text, voice_id):
+        try:
+            gen = client.text_to_speech.convert(text=text, voice_id=voice_id, model_id='eleven_multilingual_v2')
+            audio_bytes = b''.join(gen)
+            return audio_bytes
+        except Exception as e:
+            print(f'ElevenLabs segment synth failed for voice {voice_id}:', e)
+            raise
+
+    # Try to use pydub for concatenation; if not available, fall back to single-call synthesis
+    use_pydub = True
+    try:
+        from pydub import AudioSegment
+    except Exception as e:
+        print('pydub not available or failed to import; falling back to single-voice output.', e)
+        use_pydub = False
+
+    # Split script into sentences (naive split) and group small chunks to avoid many tiny requests.
+    import re
+    sentences = [s.strip() for s in re.split(r'(?<=[\.\!\?])\s+', script_text.strip()) if s.strip()]
+    if not sentences:
+        sentences = [script_text.strip()]
+
+    # Group sentences into chunks of 1-3 sentences
+    chunks = []
+    i = 0
+    while i < len(sentences):
+        chunk = sentences[i]
+        # try to keep chunk length reasonable
+        if i + 1 < len(sentences):
+            chunk += ' ' + sentences[i + 1]
+            i += 2
+        else:
+            i += 1
+        chunks.append(chunk)
+
+    # If pydub available, synth each chunk with alternating voices and concatenate
+    if use_pydub:
+        segments = []
+        for idx, chunk in enumerate(chunks):
+            voice = voice_ids[idx % len(voice_ids)]
+            try:
+                b = synth_segment(chunk, voice)
+            except Exception:
+                # if a voice fails, try the other voice
+                try:
+                    voice = voice_ids[(idx + 1) % len(voice_ids)]
+                    b = synth_segment(chunk, voice)
+                except Exception:
+                    print('All voice attempts failed for chunk; falling back to single-voice full synthesis')
+                    use_pydub = False
+                    break
+
+            # load into AudioSegment
+            try:
+                seg = AudioSegment.from_file(io.BytesIO(b), format='mp3')
+                segments.append(seg)
+            except Exception as e:
+                print('Failed to load segment into pydub AudioSegment:', e)
+                use_pydub = False
+                break
+
+        if use_pydub and segments:
+            combined = segments[0]
+            for s in segments[1:]:
+                combined += s
+
+            out_buf = io.BytesIO()
+            combined.export(out_buf, format='mp3')
+            audio_bytes = out_buf.getvalue()
+            print(f'Generated multi-voice podcast of {len(audio_bytes)} bytes')
+            return audio_bytes, [n for (_, n) in voice_map][:len(segments) if len(segments) < len(voice_map) else len(voice_map)]
+
+    # Fallback: single-call synthesis (previous behavior)
+    try:
+        print('Falling back to single-voice ElevenLabs synthesis...')
+        gen = client.text_to_speech.convert(text=script_text, voice_id=voice_ids[0], model_id='eleven_multilingual_v2')
+        audio_bytes = b''.join(gen)
+        return audio_bytes, [voice_map[0][1]]
+    except Exception as e:
+        print('ElevenLabs single-voice synthesis failed:', e)
+        return None, []
 
 # --- NEW: Podcast API Endpoint ---
 
@@ -218,13 +370,16 @@ def podcast_today():
     script = generate_podcast_script(reports)
     print(f"Generated script: \"{script[:100]}...\"")
     
-    # 3. Send the script to ElevenLabs to generate audio
-    audio_bytes = synthesize_audio_elevenlabs(script)
-    
+    # 3. Send the script to ElevenLabs to generate audio (may return chosen host names)
+    audio_bytes, host_names = synthesize_audio_elevenlabs(script)
+
     if audio_bytes:
         print("Successfully generated audio bytes. Sending to client.")
-        # Send the MP3 audio bytes back to the client
-        return send_file(io.BytesIO(audio_bytes), mimetype='audio/mpeg', as_attachment=False)
+        resp = send_file(io.BytesIO(audio_bytes), mimetype='audio/mpeg', as_attachment=False)
+        # Expose chosen hosts via header so frontend can show them
+        if host_names:
+            resp.headers['X-Podcast-Hosts'] = ','.join(host_names)
+        return resp
     else:
         print("Failed to generate audio.")
         return jsonify({'error': 'Failed to generate audio', 'script': script}), 500
@@ -283,6 +438,40 @@ def get_reports():
     finally:
         if conn: conn.close()
 
+
+@app.route('/api/trends', methods=['GET'])
+def get_trends():
+    """Query Snowflake to fetch a simple trend: busiest hour of day for reports."""
+    sf = get_snowflake_connection()
+    if not sf:
+        return jsonify({'error': 'Snowflake not configured or connection failed'}), 500
+
+    try:
+        with sf.cursor() as cur:
+            # The user-created table name is REPORTS and has timestamp_tz column
+            query = """
+            SELECT EXTRACT(HOUR FROM timestamp_tz) as hour_of_day, COUNT(*) as report_count
+            FROM REPORTS
+            GROUP BY hour_of_day
+            ORDER BY report_count DESC
+            LIMIT 1
+            """
+            cur.execute(query)
+            row = cur.fetchone()
+            if not row:
+                return jsonify({'busiest_hour': None, 'reports': 0})
+            busiest_hour = int(row[0]) if row[0] is not None else None
+            reports_count = int(row[1])
+            return jsonify({'busiest_hour': busiest_hour, 'reports': reports_count})
+    except Exception as e:
+        print('Error querying Snowflake for trends:', e)
+        return jsonify({'error': 'Failed to query Snowflake'}), 500
+    finally:
+        try:
+            sf.close()
+        except Exception:
+            pass
+
 @app.route('/api/reports', methods=['POST'])
 def create_report():
     """Creates a new report and saves it to the database."""
@@ -299,7 +488,26 @@ def create_report():
             )
             new_id, created_at = cur.fetchone()
             conn.commit()
-            
+            # Dual-write to Snowflake (optional)
+            try:
+                sf = get_snowflake_connection()
+                if sf:
+                    try:
+                        with sf.cursor() as sfc:
+                            insert_sql = f"INSERT INTO {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.REPORTS (id, description, latitude, longitude, category, timestamp_tz) VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
+                            sfc.execute(insert_sql, (int(new_id), data['description'], float(data['latitude']), float(data['longitude']), category))
+                            sf.commit()
+                    except Exception as e:
+                        print('Snowflake insert failed:', e)
+                    finally:
+                        try:
+                            sf.close()
+                        except Exception:
+                            pass
+
+            except Exception as e:
+                print('Snowflake dual-write error:', e)
+
             new_report = {'id': new_id, 'description': data['description'], 'latitude': data['latitude'], 'longitude': data['longitude'], 'category': category, 'created_at': created_at.isoformat()}
             return jsonify(new_report), 201
     except Exception as e:

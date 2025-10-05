@@ -85,7 +85,10 @@
 
     <div id="podcast-panel" class="hidden fixed right-4 bottom-4 bg-white p-4 rounded-lg shadow-2xl w-96 border border-gray-200 z-[2000]">
         <div class="flex items-center justify-between mb-2">
-            <div class="text-md font-semibold text-gray-800">Daily Community Briefing</div>
+            <div>
+                <div class="text-md font-semibold text-gray-800">Daily Community Briefing</div>
+                <div id="podcast-hosts" class="text-xs text-gray-500">Hosts: —</div>
+            </div>
             <button id="close-podcast-btn" class="text-gray-400 hover:text-gray-600">&times;</button>
         </div>
         <div id="podcast-status" class="text-sm text-gray-500 mb-2">Click the button to generate today's briefing.</div>
@@ -322,6 +325,12 @@
                 const audioBlob = await response.blob();
                 const audioUrl = URL.createObjectURL(audioBlob);
                 podcastAudio.src = audioUrl;
+                // Show hosts if server returned them
+                const hostsHeader = response.headers.get('X-Podcast-Hosts');
+                const hostsEl = document.getElementById('podcast-hosts');
+                if (hostsHeader && hostsEl) {
+                    hostsEl.textContent = 'Hosts: ' + hostsHeader.replace(/,/g, ' & ');
+                }
                 podcastAudio.play();
                 podcastStatus.textContent = 'Playing today\'s briefing.';
             } catch (e) {
