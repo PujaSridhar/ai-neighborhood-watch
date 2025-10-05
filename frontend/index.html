@@ -33,12 +33,14 @@
         <div class="flex items-center justify-between">
             <h1 class="text-xl font-bold text-gray-800">Neighborhood Watch Dashboard</h1>
             <div class="flex items-center gap-4">
-                <div class="flex items-center gap-2">
-                    <label for="start-date" class="text-sm font-medium">From:</label>
-                    <input type="date" id="start-date" class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
-                    <label for="end-date" class="text-sm font-medium">To:</label>
-                    <input type="date" id="end-date" class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
-                </div>
+                    <div class="flex items-center gap-2">
+                        <label for="start-date" class="text-sm font-medium">From:</label>
+                        <input type="date" id="start-date" class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                        <label for="end-date" class="text-sm font-medium">To:</label>
+                        <input type="date" id="end-date" class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                        <!-- trend display moved inline with dates -->
+                        <div id="trend-display" class="ml-4 text-sm text-gray-700">📈 Community Insight: Loading…</div>
+                    </div>
                 <div class="flex rounded-md shadow-sm">
                     <button id="markers-view-btn" class="control-btn px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-l-md transition active">Markers</button>
                     <button id="heatmap-view-btn" class="control-btn px-3 py-1.5 border-t border-b border-r border-gray-300 text-sm font-medium rounded-r-md transition">Heatmap</button>
@@ -49,8 +51,8 @@
                     </button>
                 </div>
             </div>
-        </div>
-        <div id="category-filters" class="flex flex-wrap gap-2 text-sm mt-3 pt-3 border-t"></div>
+    </div>
+    <div id="category-filters" class="flex flex-wrap gap-2 text-sm mt-3 pt-3 border-t"></div>
     </div>
     
     <div id="main-content">
@@ -112,6 +114,7 @@
         const endDateInput = document.getElementById('end-date');
         const summaryStatsContainer = document.getElementById('summary-stats');
         const reportListContainer = document.getElementById('report-list');
+        const trendDisplayEl = document.getElementById('trend-display');
 
         async function fetchAndDisplayReports() {
             try {
@@ -237,7 +240,7 @@
                 console.error('Failed to create report:', error);
             }
         }
-        
+
         // --- Event Listeners & Initial Load ---
         document.getElementById('markers-view-btn').addEventListener('click', (e) => {
             activeView = 'markers';
@@ -251,10 +254,10 @@
             e.target.classList.add('active');
             updateUI();
         });
-        
+
         startDateInput.addEventListener('change', updateUI);
         endDateInput.addEventListener('change', updateUI);
-        
+
         map.on('click', (e) => {
             document.getElementById('latitude').value = e.latlng.lat;
             document.getElementById('longitude').value = e.latlng.lng;
@@ -262,8 +265,40 @@
         });
         document.getElementById('report-form').addEventListener('submit', handleFormSubmit);
         document.getElementById('cancel-button').addEventListener('click', () => document.getElementById('report-modal').classList.add('hidden'));
-        
-        document.addEventListener('DOMContentLoaded', fetchAndDisplayReports);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            fetchAndDisplayReports();
+            // allow the map to correctly size behind overlays
+            setTimeout(() => { map.invalidateSize(); }, 250);
+        });
+
+        // --- NEW: Fetch and display trends from Snowflake ---
+        async function fetchAndDisplayTrends() {
+            try {
+                const resp = await fetch(`${API_BASE_URL}/api/trends`);
+                if (!resp.ok) {
+                    trendDisplayEl.textContent = '📈 Community Insight: (unavailable)';
+                    return;
+                }
+                const data = await resp.json();
+                if (!data || data.busiest_hour === null) {
+                    trendDisplayEl.textContent = '📈 Community Insight: Not enough data yet.';
+                    return;
+                }
+                const hour = data.busiest_hour;
+                const reports = data.reports;
+                const pretty = new Date(); pretty.setHours(hour,0,0,0);
+                const hourLabel = pretty.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                trendDisplayEl.textContent = `📈 Community Insight: The busiest time is around ${hourLabel} (${reports} reports).`;
+            } catch (e) {
+                console.error('Failed to fetch trends:', e);
+                trendDisplayEl.textContent = '📈 Community Insight: Error fetching insights.';
+            }
+        }
+
+        // call on load and every 5 minutes
+        fetchAndDisplayTrends();
+        setInterval(fetchAndDisplayTrends, 5 * 60 * 1000);
 
         // --- NEW: Podcast Feature Logic ---
         const podcastButton = document.getElementById('podcast-button');
