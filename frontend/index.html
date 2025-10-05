@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI-Powered Neighborhood Watch Dashboard</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://unpkg.com/leaflet.heat@0.2.0/dist/leaflet-heat.js"></script>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.css" />
+    <link rel="stylesheet" href="https://unpkg.com/leaflet.markercluster@1.5.3/dist/MarkerCluster.Default.css" />
+    <script src="https://unpkg.com/leaflet.markercluster@1.5.3/dist/leaflet.markercluster.js"></script>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        body { font-family: 'Inter', sans-serif; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+        #top-bar { flex-shrink: 0; z-index: 1000; }
+        #main-content { display: flex; flex-grow: 1; overflow: hidden; }
+        #sidebar { width: 380px; flex-shrink: 0; display: flex; flex-direction: column; }
+        #map-container { flex-grow: 1; }
+        #map { height: 100%; }
+        .control-btn.active { background-color: #3B82F6; color: white; border-color: #3B82F6; }
+        #report-list::-webkit-scrollbar { width: 6px; }
+        #report-list::-webkit-scrollbar-track { background: #f1f1f1; }
+        #report-list::-webkit-scrollbar-thumb { background: #a8a8a8; border-radius: 6px; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div id="top-bar" class="bg-white border-b border-gray-200 p-3 shadow-sm">
+        <div class="flex items-center justify-between">
+            <h1 class="text-xl font-bold text-gray-800">Neighborhood Watch Dashboard</h1>
+            <div class="flex items-center gap-4">
+                <div class="flex items-center gap-2">
+                    <label for="start-date" class="text-sm font-medium">From:</label>
+                    <input type="date" id="start-date" class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                    <label for="end-date" class="text-sm font-medium">To:</label>
+                    <input type="date" id="end-date" class="text-sm border-gray-300 rounded-md shadow-sm focus:ring-blue-500 focus:border-blue-500">
+                </div>
+                <div class="flex rounded-md shadow-sm">
+                    <button id="markers-view-btn" class="control-btn px-3 py-1.5 border border-gray-300 text-sm font-medium rounded-l-md transition active">Markers</button>
+                    <button id="heatmap-view-btn" class="control-btn px-3 py-1.5 border-t border-b border-r border-gray-300 text-sm font-medium rounded-r-md transition">Heatmap</button>
+                </div>
+                <div class="ml-3">
+                    <button id="podcast-button" class="bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded-lg shadow-sm transition-transform transform hover:scale-105">
+                        ▶️ Listen to Daily Briefing
+                    </button>
+                </div>
+            </div>
+        </div>
+        <div id="category-filters" class="flex flex-wrap gap-2 text-sm mt-3 pt-3 border-t"></div>
+    </div>
+    
+    <div id="main-content">
+        <div id="sidebar" class="bg-white border-r border-gray-200 p-4 flex flex-col">
+            <div id="summary-stats" class="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg text-center">
+                <span class="text-3xl font-bold text-blue-700">0</span>
+                <p class="text-sm font-medium text-blue-600">Incidents Matching Filters</p>
+            </div>
+            <div id="report-list" class="flex-grow overflow-y-auto pr-2"></div>
+        </div>
+        <div id="map-container"><div id="map"></div></div>
+    </div>
+
+    <div id="report-modal" class="hidden fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[2000]">
+        <div class="bg-white rounded-lg p-8 shadow-xl w-full max-w-md m-4">
+            <h2 class="text-2xl font-bold mb-4">File a New Report</h2>
+            <form id="report-form">
+                <div class="mb-4">
+                    <label for="description" class="block text-gray-700 text-sm font-bold mb-2">Description of Incident:</label>
+                    <textarea id="description" rows="4" class="shadow appearance-none border rounded-lg w-full py-2 px-3 text-gray-700" required placeholder="e.g., Saw a suspicious vehicle..."></textarea>
+                </div>
+                <input type="hidden" id="latitude"><input type="hidden" id="longitude">
+                <div class="flex items-center justify-end space-x-4">
+                    <button type="button" id="cancel-button" class="bg-gray-200 hover:bg-gray-300 text-gray-800 font-bold py-2 px-4 rounded-lg">Cancel</button>
+                    <button type="submit" class="bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded-lg">Submit Report</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="podcast-panel" class="hidden fixed right-4 bottom-4 bg-white p-4 rounded-lg shadow-2xl w-96 border border-gray-200 z-[2000]">
+        <div class="flex items-center justify-between mb-2">
+            <div class="text-md font-semibold text-gray-800">Daily Community Briefing</div>
+            <button id="close-podcast-btn" class="text-gray-400 hover:text-gray-600">&times;</button>
+        </div>
+        <div id="podcast-status" class="text-sm text-gray-500 mb-2">Click the button to generate today's briefing.</div>
+        <audio id="podcast-audio" controls class="w-full"></audio>
+    </div>
+
+    <script>
+        const API_BASE_URL = 'http://127.0.0.1:5001';
+        const CATEGORIES = {
+            'Theft': '#DC2626', 'Vandalism': '#F97316', 'Accident': '#2563EB',
+            'Fire': '#8B0000', 'Suspicious Activity': '#FBBF24', 'Other': '#6B7280', 'Uncategorized': '#6B7280'
+        };
+
+        let allReports = [];
+        let activeCategories = new Set(Object.keys(CATEGORIES));
+        let activeView = 'markers';
+        let markerClusterGroup = L.markerClusterGroup();
+        let heatLayer;
+
+        const map = L.map('map').setView([40.5008, -74.4478], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '&copy; OpenStreetMap' }).addTo(map);
+        map.addLayer(markerClusterGroup);
+
+        const categoryFiltersContainer = document.getElementById('category-filters');
+        const startDateInput = document.getElementById('start-date');
+        const endDateInput = document.getElementById('end-date');
+        const summaryStatsContainer = document.getElementById('summary-stats');
+        const reportListContainer = document.getElementById('report-list');
+
+        async function fetchAndDisplayReports() {
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/reports`);
+                allReports = await response.json();
+                populateCategoryFilters();
+                setDefaultDates();
+                updateUI();
+            } catch (error) {
+                console.error("Could not fetch reports:", error);
+            }
+        }
+        
+        function updateUI() {
+            const filteredReports = getFilteredReports();
+            updateSummaryStats(filteredReports);
+            updateReportList(filteredReports);
+            updateMapView(filteredReports);
+        }
+
+        function getFilteredReports() {
+            const startDate = startDateInput.value ? new Date(startDateInput.value + 'T00:00:00') : null;
+            const endDate = endDateInput.value ? new Date(endDateInput.value + 'T23:59:59') : null;
+            
+            return allReports.filter(r => {
+                const isCategoryActive = activeCategories.has(r.category);
+                if (!isCategoryActive) return false;
+                const reportDate = new Date(r.created_at);
+                return (!startDate || reportDate >= startDate) && (!endDate || reportDate <= endDate);
+            });
+        }
+        
+        function setDefaultDates() {
+            endDateInput.value = new Date().toISOString().split('T')[0];
+            const thirtyDaysAgo = new Date();
+            thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+            startDateInput.value = thirtyDaysAgo.toISOString().split('T')[0];
+        }
+
+        function updateSummaryStats(filteredReports) {
+            summaryStatsContainer.querySelector('span').textContent = filteredReports.length;
+        }
+
+        function updateReportList(filteredReports) {
+            reportListContainer.innerHTML = filteredReports.length === 0 
+                ? `<p class="text-gray-500 italic p-4 text-center">No reports match filters.</p>`
+                : filteredReports.map(report => {
+                    const color = CATEGORIES[report.category] || CATEGORIES['Other'];
+                    return `
+                        <div class="p-3 border-b border-gray-200 cursor-pointer hover:bg-gray-50" onclick="map.flyTo([${report.latitude}, ${report.longitude}], 16)">
+                            <div class="flex items-center">
+                                <span class="w-3 h-3 rounded-full mr-3" style="background-color: ${color}; flex-shrink: 0;"></span>
+                                <div class="flex-grow">
+                                    <div class="flex justify-between items-baseline">
+                                        <p class="font-semibold text-sm">${report.category}</p>
+                                        <p class="text-xs text-gray-500">${new Date(report.created_at).toLocaleDateString()}</p>
+                                    </div>
+                                    <p class="text-gray-600 text-sm mt-1">${report.description}</p>
+                                </div>
+                            </div>
+                        </div>`;
+                }).join('');
+        }
+        
+        function updateMapView(filteredReports) {
+            markerClusterGroup.clearLayers();
+            if (heatLayer) map.removeLayer(heatLayer);
+
+            if (activeView === 'heatmap') {
+                const heatPoints = filteredReports.map(r => [r.latitude, r.longitude, 0.5]);
+                if (heatPoints.length > 0) {
+                    heatLayer = L.heatLayer(heatPoints, { radius: 25, blur: 15 }).addTo(map);
+                }
+            } else {
+                filteredReports.forEach(report => {
+                    const icon = getMarkerIcon(report.category);
+                    const marker = L.marker([report.latitude, report.longitude], { icon });
+                    marker.bindPopup(`<b>${report.category}</b><br>${report.description}`);
+                    markerClusterGroup.addLayer(marker);
+                });
+            }
+        }
+        
+        function populateCategoryFilters() {
+            categoryFiltersContainer.innerHTML = Object.keys(CATEGORIES).map(category => 
+                `<button class="control-btn px-3 py-1 border rounded-md transition text-xs font-medium active" data-category="${category}">${category}</button>`
+            ).join('');
+            categoryFiltersContainer.querySelectorAll('button').forEach(button => {
+                button.addEventListener('click', () => {
+                    const category = button.dataset.category;
+                    activeCategories.has(category) ? activeCategories.delete(category) : activeCategories.add(category);
+                    button.classList.toggle('active');
+                    updateUI();
+                });
+            });
+        }
+        
+        function getMarkerIcon(category) {
+            const color = CATEGORIES[category] || CATEGORIES['Other'];
+            const svgIcon = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="${color}" width="36px" height="36px" filter="drop-shadow(0 2px 2px rgba(0,0,0,0.3))"><path d="M12 0C7.589 0 4 3.589 4 8c0 4.411 8 16 8 16s8-11.589 8-16c0-4.411-3.589-8-8-8zm0 12c-2.21 0-4-1.79-4-4s1.79-4 4-4 4 1.79 4 4-1.79 4-4 4z"/></svg>`;
+            return new L.Icon({ iconUrl: 'data:image/svg+xml;base64,' + btoa(svgIcon), iconSize: [36, 36], iconAnchor: [18, 36], popupAnchor: [0, -36] });
+        }
+
+        async function handleFormSubmit(event) {
+            event.preventDefault();
+            const reportData = {
+                description: document.getElementById('description').value,
+                latitude: parseFloat(document.getElementById('latitude').value),
+                longitude: parseFloat(document.getElementById('longitude').value)
+            };
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/reports`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(reportData),
+                });
+                const newReport = await response.json();
+                allReports.unshift(newReport);
+                updateUI();
+                document.getElementById('report-form').reset();
+                document.getElementById('report-modal').classList.add('hidden');
+            } catch (error) {
+                console.error('Failed to create report:', error);
+            }
+        }
+        
+        // --- Event Listeners & Initial Load ---
+        document.getElementById('markers-view-btn').addEventListener('click', (e) => {
+            activeView = 'markers';
+            document.getElementById('heatmap-view-btn').classList.remove('active');
+            e.target.classList.add('active');
+            updateUI();
+        });
+        document.getElementById('heatmap-view-btn').addEventListener('click', (e) => {
+            activeView = 'heatmap';
+            document.getElementById('markers-view-btn').classList.remove('active');
+            e.target.classList.add('active');
+            updateUI();
+        });
+        
+        startDateInput.addEventListener('change', updateUI);
+        endDateInput.addEventListener('change', updateUI);
+        
+        map.on('click', (e) => {
+            document.getElementById('latitude').value = e.latlng.lat;
+            document.getElementById('longitude').value = e.latlng.lng;
+            document.getElementById('report-modal').classList.remove('hidden');
+        });
+        document.getElementById('report-form').addEventListener('submit', handleFormSubmit);
+        document.getElementById('cancel-button').addEventListener('click', () => document.getElementById('report-modal').classList.add('hidden'));
+        
+        document.addEventListener('DOMContentLoaded', fetchAndDisplayReports);
+
+        // --- NEW: Podcast Feature Logic ---
+        const podcastButton = document.getElementById('podcast-button');
+        const podcastPanel = document.getElementById('podcast-panel');
+        const podcastAudio = document.getElementById('podcast-audio');
+        const podcastStatus = document.getElementById('podcast-status');
+        const closePodcastBtn = document.getElementById('close-podcast-btn');
+
+        podcastButton.addEventListener('click', async () => {
+            podcastPanel.classList.remove('hidden');
+            podcastStatus.textContent = 'Generating briefing... This may take a moment.';
+            podcastStatus.classList.remove('text-red-500');
+            podcastAudio.src = ''; // Clear previous audio
+            
+            try {
+                const response = await fetch(`${API_BASE_URL}/api/podcast/today`);
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({ error: 'Unknown server error' }));
+                    throw new Error(err.error || 'Failed to generate podcast.');
+                }
+                const audioBlob = await response.blob();
+                const audioUrl = URL.createObjectURL(audioBlob);
+                podcastAudio.src = audioUrl;
+                podcastAudio.play();
+                podcastStatus.textContent = 'Playing today\'s briefing.';
+            } catch (e) {
+                podcastStatus.textContent = `Error: ${e.message}`;
+                podcastStatus.classList.add('text-red-500');
+                console.error('Error fetching podcast:', e);
+            }
+        });
+
+        closePodcastBtn.addEventListener('click', () => {
+            podcastPanel.classList.add('hidden');
+            podcastAudio.pause();
+            podcastAudio.src = '';
+        });
+    </script>
+</body>
+</html>
