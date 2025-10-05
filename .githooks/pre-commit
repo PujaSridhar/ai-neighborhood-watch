@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+# Pre-commit hook to prevent committing secrets like .env or API keys.
+# This script checks staged files for filenames like .env and patterns
+# that look like API keys (simple heuristics) and aborts the commit if found.
+
+set -euo pipefail
+
+fail() {
+  echo "\nERROR: Commit aborted by pre-commit hook.\n$1\n"
+  exit 1
+}
+
+echo "Running pre-commit secret-scan..."
+
+# Don't run if no staged changes
+if [ -z "$(git diff --cached --name-only)" ]; then
+  echo "No staged changes. Skipping secret-scan."
+  exit 0
+fi
+
+BAD=0
+
+# 1) Block files with sensitive filenames
+while IFS= read -r -d '' file; do
+  fname=$(basename "$file")
+  if [[ "$fname" == ".env" || "$file" == "backend/.env" || "$file" == ".env.local" ]]; then
+    echo "Blocked: attempting to commit sensitive filename: $file"
+    BAD=1
+  fi
+done < <(git diff --cached --name-only -z)
+
+# 2) Scan staged files content for API-key-like patterns
+PATTERNS=(
+  "GEMINI_API_KEY"
+  "ELEVENLABS_API_KEY"
+  "AIza[0-9A-Za-z_-]{35}" # common Google API key prefix
+  "-----BEGIN PRIVATE KEY-----"
+)
+
+while IFS= read -r -d '' file; do
+  # only check text files and skip binary
+  if git diff --cached --numstat -- "$file" | awk '{print $1}' | grep -qE '^[0-9]+'; then
+    # get staged content for file
+    content=$(git show :"$file" 2>/dev/null || true)
+    for pat in "${PATTERNS[@]}"; do
+      if echo "$content" | grep -E -q "$pat"; then
+        echo "Blocked: pattern '$pat' found in staged file: $file"
+        BAD=1
+      fi
+    done
+  fi
+done < <(git diff --cached --name-only -z)
+
+if [ "$BAD" -ne 0 ]; then
+  fail "One or more sensitive patterns were found in staged files. Remove secrets from the files and try again."
+fi
+
+echo "pre-commit secret-scan passed."
+exit 0
