@@ -6,6 +6,6 @@
         "dev": "echo 'Run api and frontend manually or install concurrently'"
     },
     "engines": {
-        "node": "18.x"
+        "node": "22.x"
     }
 }
