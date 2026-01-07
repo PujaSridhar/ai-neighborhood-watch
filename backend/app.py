@@ -8,6 +8,8 @@ from flask_cors import CORS
 import psycopg2
 from dotenv import load_dotenv
 import snowflake.connector
+import feedparser
+import requests
 
 # Import Gemini SDK optionally so the app can run even if the package isn't installed
 # Prefer the newer `from google import genai` client if available; otherwise fall back to
@@ -125,6 +127,37 @@ if GEMINI_API_KEY:
 else:
     print("No GEMINI_API_KEY found - using fallback categorization only.")
 
+# --- Failure tracking for Gemini to avoid repeated 429s ---
+GEMINI_FAILURE_COUNT = 0
+GEMINI_LAST_FAILURE_AT = None
+GEMINI_FAILURE_THRESHOLD = int(os.getenv('GEMINI_FAILURE_THRESHOLD', '5'))
+GEMINI_FAILURE_RESET_SECONDS = int(os.getenv('GEMINI_FAILURE_RESET_SECONDS', str(60 * 5)))
+
+def gemini_failure_register(exc=None):
+    """Record a Gemini failure and return whether AI should be temporarily disabled."""
+    global GEMINI_FAILURE_COUNT, GEMINI_LAST_FAILURE_AT
+    try:
+        GEMINI_FAILURE_COUNT += 1
+        GEMINI_LAST_FAILURE_AT = datetime.utcnow()
+        print(f'Gemini failure #{GEMINI_FAILURE_COUNT}: {exc}')
+    except Exception:
+        pass
+
+def gemini_failure_should_disable():
+    """Return True if Gemini failures exceeded threshold and cooldown hasn't expired."""
+    global GEMINI_FAILURE_COUNT, GEMINI_LAST_FAILURE_AT
+    if GEMINI_FAILURE_COUNT >= GEMINI_FAILURE_THRESHOLD:
+        if not GEMINI_LAST_FAILURE_AT:
+            return True
+        elapsed = (datetime.utcnow() - GEMINI_LAST_FAILURE_AT).total_seconds()
+        if elapsed < GEMINI_FAILURE_RESET_SECONDS:
+            return True
+        # reset after cooldown
+        GEMINI_FAILURE_COUNT = 0
+        GEMINI_LAST_FAILURE_AT = None
+        return False
+    return False
+
 app = Flask(__name__)
 CORS(app, resources={r"/api/*": {"origins": "*"}})
 
@@ -155,6 +188,9 @@ def get_snowflake_connection():
     except Exception as e:
         print('Snowflake connection failed:', e)
         return None
+
+
+# save_report removed with Google News ingestion rollback
 
 # --- NEW: Podcast Feature Functions ---
 
@@ -215,6 +251,11 @@ def generate_podcast_script(reports):
     # If AI is available, ask Gemini to make the dialogue natural and conversational but keep the
     # two-host structure (Ava=female, Mateo=male). Ask for concise phrasing suitable for an audio
     # briefing (about 60-90 seconds).
+    # If many Gemini failures happened recently, temporarily avoid AI calls
+    if gemini_failure_should_disable():
+        print('Gemini temporarily disabled due to repeated failures; using local script.')
+        return script
+
     if not AI_ENABLED:
         return script
 
@@ -227,6 +268,10 @@ def generate_podcast_script(reports):
             "\n\nOriginal dialogue:\n" + script
         )
 
+        if gemini_failure_should_disable():
+            print('Gemini temporarily disabled at generation time; returning local script.')
+            return script
+
         if GENAI_AVAILABLE and GENAI_NEW and genai_client:
             model_name = globals().get('MODEL_NAME') or 'gemini-2.0-flash'
             resp = genai_client.models.generate_content(model=model_name, contents=prompt)
@@ -238,6 +283,7 @@ def generate_podcast_script(reports):
             return resp.text.strip()
     except Exception as e:
         print('Gemini script generation failed (fallback to local):', e)
+        gemini_failure_register(e)
         return script
 
 def synthesize_audio_elevenlabs(script_text, reports=None):
@@ -355,6 +401,10 @@ def synthesize_audio_elevenlabs(script_text, reports=None):
         print('ElevenLabs single-voice synthesis failed:', e)
         return None, []
 
+
+# --- NEW: Google News / RSS ingestion ---
+# Google News ingestion removed
+
 # --- NEW: Podcast API Endpoint ---
 
 @app.route('/api/podcast/today', methods=['GET'])
@@ -388,6 +438,14 @@ def podcast_today():
 
 def categorize_report(description):
     """Uses Gemini to categorize an incident description."""
+    if gemini_failure_should_disable():
+        print('Gemini temporarily disabled for categorization; using local heuristic.')
+        return (lambda s: ( 'Theft' if 'theft' in s or 'stolen' in s or 'robbery' in s or 'stole' in s or 'steal' in s else
+                           'Vandalism' if 'vandal' in s or 'graffiti' in s else
+                           'Accident' if 'accident' in s or 'crash' in s else
+                           'Fire' if 'fire' in s or 'smoke' in s else
+                           'Suspicious Activity' if 'suspicious' in s else 'Other'))((description or '').lower())
+
     if not AI_ENABLED:
         print("AI disabled — using local keyword heuristic for categorization.")
         s = (description or '').lower()
@@ -418,7 +476,219 @@ def categorize_report(description):
         return category
     except Exception as e:
         print(f"!!! GEMINI ERROR: {e}")
+        gemini_failure_register(e)
         return "Uncategorized"
+
+
+def geocode_place_text(text):
+    """Optional simple geocode using Nominatim (OpenStreetMap). Enable with NOMINATIM_ENABLED=1.
+
+    Returns (lat, lon) or (None, None).
+    """
+    # geocoding removed as part of Google News ingestion rollback
+    return None, None
+
+
+def local_categorize(description):
+    """Local keyword-based categorization (explicitly avoids Gemini)."""
+    s = (description or '').lower()
+    if 'theft' in s or 'stolen' in s or 'robbery' in s or 'stole' in s or 'steal' in s: return 'Theft'
+    if 'vandal' in s or 'graffiti' in s: return 'Vandalism'
+    if 'accident' in s or 'crash' in s: return 'Accident'
+    if 'fire' in s or 'smoke' in s: return 'Fire'
+    if 'suspicious' in s or 'suspicion' in s: return 'Suspicious Activity'
+    return 'Other'
+
+
+@app.route('/api/ai/status', methods=['GET'])
+def ai_status():
+    """Return a short report of Gemini availability and a lightweight test (non-destructive).
+
+    This does not perform heavy requests and will avoid making many calls.
+    """
+    status = {
+        'GENAI_AVAILABLE': GENAI_AVAILABLE,
+        'GENAI_NEW': GENAI_NEW,
+        'GEMINI_API_KEY_set': bool(GEMINI_API_KEY),
+        'AI_ENABLED': AI_ENABLED,
+        'MODEL_NAME': globals().get('MODEL_NAME') if 'MODEL_NAME' in globals() else None,
+    }
+    # Try a very small safety test if AI is enabled and hasn't been recently failing
+    if GENAI_AVAILABLE and AI_ENABLED and not gemini_failure_should_disable():
+        try:
+            if GENAI_NEW and genai_client:
+                resp = genai_client.models.generate_content(model=globals().get('MODEL_NAME') or 'gemini-2.0-flash', contents='Respond with one word: Theft or Other')
+                txt = getattr(resp, 'text', None) or (resp.get('candidates')[0].get('content') if isinstance(resp, dict) and resp.get('candidates') else None)
+                status['light_test'] = (txt or '').strip()
+            elif GENAI_AVAILABLE and not GENAI_NEW:
+                m = genai.GenerativeModel(globals().get('MODEL_NAME') or 'gemini-2.0-flash')
+                resp = m.generate_content('Respond with one word: Theft or Other')
+                status['light_test'] = getattr(resp, 'text', None)
+        except Exception as e:
+            status['light_test_error'] = str(e)
+            gemini_failure_register(e)
+    else:
+        status['light_test'] = 'skipped'
+
+    return jsonify(status)
+
+
+
+
+@app.route('/api/news', methods=['GET'])
+def get_news():
+    """Fetches local news from Google RSS."""
+    lat = request.args.get('lat')
+    lon = request.args.get('lon')
+    
+    # Default to New Brunswick if no location
+    query = "new brunswick neighborhood crime"
+    if lat and lon:
+        # In a real app, we'd reverse geocode here. For now, let's just use a generic "local" query or keep it simple.
+        # Or we can try to use the coordinates in the query if Google supports it (it supports "near ...").
+        # Let's stick to the default query for stability, or maybe "neighborhood crime"
+        pass
+
+    rss_url = os.getenv('NEWS_RSS_URL') or 'https://news.google.com/rss/search?q=new+brunswick+neighborhood+crime&hl=en-US&gl=US&ceid=US:en'
+    
+    try:
+        resp = requests.get(rss_url, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch RSS feed: {e}'}), 502
+
+    feed = feedparser.parse(resp.content)
+    entries = feed.entries or []
+    
+    news_items = []
+    for entry in entries[:20]:
+        news_items.append({
+            'title': entry.get('title', ''),
+            'summary': entry.get('summary', ''),
+            'url': entry.get('link', ''),
+            'published': entry.get('published', '')
+        })
+        
+    return jsonify(news_items)
+
+@app.route('/api/news/fetch', methods=['POST'])
+def news_fetch_server():
+    """Server-side RSS importer that explicitly avoids using Gemini for categorization.
+
+    POST optional JSON { "rss_url": "..." }
+    """
+    payload = request.get_json(silent=True) or {}
+    rss_url = payload.get('rss_url') or os.getenv('NEWS_RSS_URL') or 'https://news.google.com/rss/search?q=new+brunswick+neighborhood+crime&hl=en-US&gl=US&ceid=US:en'
+
+    try:
+        resp = requests.get(rss_url, timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        return jsonify({'error': f'Failed to fetch RSS feed: {e}'}), 502
+
+    feed = feedparser.parse(resp.content)
+    entries = feed.entries or []
+    max_process = int(os.getenv('NEWS_MAX_ITEMS', '25'))
+    created = []
+    skipped = []
+
+    # Load existing descriptions to dedupe
+    conn = get_db_connection()
+    existing = set()
+    if conn:
+        try:
+            with conn.cursor() as cur:
+                cur.execute('SELECT description FROM reports')
+                for row in cur.fetchall():
+                    if row and row[0]: existing.add(row[0].strip().lower())
+        except Exception as e:
+            print('Failed to read existing reports for dedupe:', e)
+        finally:
+            conn.close()
+
+    for entry in entries[:max_process]:
+        title = entry.get('title') if isinstance(entry, dict) else getattr(entry, 'title', '')
+        summary = entry.get('summary') if isinstance(entry, dict) else getattr(entry, 'summary', '')
+        link = entry.get('link') if isinstance(entry, dict) else getattr(entry, 'link', '')
+        desc = (title or '').strip()
+        if summary and summary not in desc:
+            desc = desc + ' — ' + (summary[:280] + '...' if len(summary) > 280 else summary)
+
+        key = desc.strip().lower()
+        if key in existing:
+            skipped.append({'title': title, 'reason': 'duplicate'})
+            continue
+
+        # Try to get georss content
+        lat = None; lon = None
+        try:
+            if isinstance(entry, dict):
+                if entry.get('geo_lat') and entry.get('geo_long'):
+                    lat = float(entry.get('geo_lat')); lon = float(entry.get('geo_long'))
+                elif entry.get('georss_point'):
+                    parts = entry.get('georss_point').split()
+                    if len(parts) >= 2:
+                        lat = float(parts[0]); lon = float(parts[1])
+            else:
+                if getattr(entry, 'geo_lat', None) and getattr(entry, 'geo_long', None):
+                    lat = float(getattr(entry, 'geo_lat')); lon = float(getattr(entry, 'geo_long'))
+        except Exception:
+            lat = None; lon = None
+
+        if lat is None or lon is None:
+            try:
+                lat = float(os.getenv('NEWS_DEFAULT_LAT', '40.5008'))
+                lon = float(os.getenv('NEWS_DEFAULT_LON', '-74.4478'))
+            except Exception:
+                lat, lon = 40.5008, -74.4478
+
+        # Use local categorization to avoid Gemini usage
+        category = local_categorize(desc)
+
+        # Truncate description to avoid DB column size errors
+        max_len = int(os.getenv('REPORT_DESC_MAX_LEN', '100'))
+        desc_trimmed = (desc or '')[:max_len]
+
+        # Insert into Postgres
+        conn = get_db_connection()
+        if not conn:
+            skipped.append({'title': title, 'reason': 'db_connect_failed'})
+            continue
+        try:
+            with conn.cursor() as cur:
+                cur.execute('INSERT INTO reports (description, latitude, longitude, category) VALUES (%s, %s, %s, %s) RETURNING id, created_at', (desc_trimmed, float(lat), float(lon), category))
+                new_id, created_at = cur.fetchone()
+                conn.commit()
+                created.append({'id': new_id, 'title': title, 'link': link})
+                existing.add(key)
+                # Optional dual-write to Snowflake (best-effort)
+                try:
+                    sf = get_snowflake_connection()
+                    if sf:
+                        try:
+                            with sf.cursor() as sfc:
+                                insert_sql = f"INSERT INTO {SNOWFLAKE_DATABASE}.{SNOWFLAKE_SCHEMA}.REPORTS (id, description, latitude, longitude, category, timestamp_tz) VALUES (%s, %s, %s, %s, %s, CURRENT_TIMESTAMP)"
+                                sfc.execute(insert_sql, (int(new_id), desc_trimmed, float(lat), float(lon), category))
+                                sf.commit()
+                        except Exception as e:
+                            print('Snowflake insert failed (news fetch):', e)
+                        finally:
+                            try: sf.close()
+                            except Exception: pass
+                except Exception:
+                    pass
+        except Exception as e:
+            print('Failed to insert news report:', e)
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            skipped.append({'title': title, 'reason': 'insert_failed'})
+        finally:
+            try: conn.close()
+            except Exception: pass
+
+    return jsonify({'created': created, 'skipped': skipped, 'processed': min(len(entries), max_process)}), 200
 
 @app.route('/api/reports', methods=['GET'])
 def get_reports():
@@ -441,17 +711,44 @@ def get_reports():
 
 @app.route('/api/trends', methods=['GET'])
 def get_trends():
-    """Query Snowflake to fetch a simple trend: busiest hour of day for reports."""
+    """Query Snowflake for trends, falling back to Postgres if Snowflake is unavailable."""
+    
+    # 1. Try Snowflake
     sf = get_snowflake_connection()
-    if not sf:
-        return jsonify({'error': 'Snowflake not configured or connection failed'}), 500
+    if sf:
+        try:
+            with sf.cursor() as cur:
+                query = """
+                SELECT EXTRACT(HOUR FROM timestamp_tz) as hour_of_day, COUNT(*) as report_count
+                FROM REPORTS
+                GROUP BY hour_of_day
+                ORDER BY report_count DESC
+                LIMIT 1
+                """
+                cur.execute(query)
+                row = cur.fetchone()
+                if row:
+                    busiest_hour = int(row[0]) if row[0] is not None else None
+                    reports_count = int(row[1])
+                    return jsonify({'busiest_hour': busiest_hour, 'reports': reports_count, 'source': 'snowflake'})
+        except Exception as e:
+            print('Snowflake query failed, falling back to Postgres:', e)
+        finally:
+            try: sf.close()
+            except Exception: pass
 
+    # 2. Fallback to Postgres
+    print("Using Postgres fallback for trends...")
+    conn = get_db_connection()
+    if not conn:
+        return jsonify({'error': 'Database connection failed'}), 500
+    
     try:
-        with sf.cursor() as cur:
-            # The user-created table name is REPORTS and has timestamp_tz column
+        with conn.cursor() as cur:
+            # Postgres equivalent query
             query = """
-            SELECT EXTRACT(HOUR FROM timestamp_tz) as hour_of_day, COUNT(*) as report_count
-            FROM REPORTS
+            SELECT EXTRACT(HOUR FROM created_at) as hour_of_day, COUNT(*) as report_count
+            FROM reports
             GROUP BY hour_of_day
             ORDER BY report_count DESC
             LIMIT 1
@@ -459,18 +756,17 @@ def get_trends():
             cur.execute(query)
             row = cur.fetchone()
             if not row:
-                return jsonify({'busiest_hour': None, 'reports': 0})
+                return jsonify({'busiest_hour': None, 'reports': 0, 'source': 'postgres'})
+            
             busiest_hour = int(row[0]) if row[0] is not None else None
             reports_count = int(row[1])
-            return jsonify({'busiest_hour': busiest_hour, 'reports': reports_count})
+            return jsonify({'busiest_hour': busiest_hour, 'reports': reports_count, 'source': 'postgres'})
+            
     except Exception as e:
-        print('Error querying Snowflake for trends:', e)
-        return jsonify({'error': 'Failed to query Snowflake'}), 500
+        print('Postgres trends query failed:', e)
+        return jsonify({'error': 'Failed to fetch trends'}), 500
     finally:
-        try:
-            sf.close()
-        except Exception:
-            pass
+        if conn: conn.close()
 
 @app.route('/api/reports', methods=['POST'])
 def create_report():
@@ -502,9 +798,7 @@ def create_report():
                     finally:
                         try:
                             sf.close()
-                        except Exception:
-                            pass
-
+                        except Exception: pass
             except Exception as e:
                 print('Snowflake dual-write error:', e)
 
@@ -517,4 +811,5 @@ def create_report():
         if conn: conn.close()
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5001, debug=True)
+    port = int(os.environ.get('PORT', 5001))
+    app.run(host='0.0.0.0', port=port, debug=True)

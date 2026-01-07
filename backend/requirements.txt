@@ -6,3 +6,4 @@ google-generativeai
 elevenlabs
 snowflake-connector-python
 pydub
+

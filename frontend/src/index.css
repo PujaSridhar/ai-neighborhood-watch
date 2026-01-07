@@ -1,0 +1,119 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    /* Aura Theme Variables - Serious Data Aesthetic */
+    /* Light Mode (Secondary) */
+    --color-bg-primary: #f8fafc;
+    --color-bg-secondary: #ffffff;
+    --color-bg-tertiary: #f1f5f9;
+    --color-text-primary: #0f172a;
+    --color-text-secondary: #475569;
+    --color-border: #e2e8f0;
+    --color-accent: #dc2626;
+    /* Serious Red */
+    --color-accent-hover: #b91c1c;
+    --color-surface-hover: #f1f5f9;
+
+    /* Font Settings */
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  /* Dark Mode Defaults (Black & Gold) */
+  .dark {
+    --color-bg-primary: #000000;
+    --color-bg-secondary: #0a0a0a;
+    --color-bg-tertiary: #171717;
+    /* Neutral 900 */
+    --color-panel: rgba(10, 10, 10, 0.75);
+    /* High transparency for glass */
+
+    --color-text-primary: #EDEDED;
+    --color-text-secondary: #A1A1AA;
+
+    --color-accent: #D4AF37;
+    /* Premium Gold */
+    --color-accent-dim: rgba(212, 175, 55, 0.15);
+    --color-accent-hover: #FCD34D;
+    --color-surface-hover: rgba(255, 255, 255, 0.05);
+
+    --color-danger: #ef4444;
+    --color-success: #10b981;
+
+    --color-border: rgba(212, 175, 55, 0.3);
+    /* Subtle Gold border */
+  }
+
+  body {
+    background-color: var(--color-bg-primary);
+    color: var(--color-text-primary);
+    font-family: var(--font-sans);
+    overflow: hidden;
+    -webkit-font-smoothing: antialiased;
+  }
+}
+
+/* Base Components */
+@layer components {
+  .btn-primary {
+    @apply px-4 py-2 bg-[var(--color-accent)] text-black font-bold uppercase tracking-wide rounded hover:brightness-110 transition-all active:scale-95 text-xs shadow-md;
+  }
+
+  .btn-secondary {
+    @apply px-4 py-2 bg-[var(--color-accent-dim)] text-[var(--color-accent)] border border-[var(--color-border)] font-medium uppercase tracking-wide rounded hover:bg-[var(--color-border)] transition-all active:scale-95 text-xs backdrop-blur-sm;
+  }
+
+  .panel-aura {
+    @apply bg-[var(--color-panel)] border border-[var(--color-border)] rounded-xl backdrop-blur-xl shadow-2xl;
+  }
+
+  .input-aura {
+    @apply w-full px-3 py-2 bg-[var(--color-bg-primary)] border border-[var(--color-border)] rounded-md text-[var(--color-text-primary)] focus:outline-none focus:border-[var(--color-accent)] focus:ring-1 focus:ring-[var(--color-accent)] transition-all;
+  }
+
+  .text-label {
+    @apply text-xs font-bold uppercase tracking-wider text-[var(--color-text-secondary)];
+  }
+}
+
+/* Map Overrides */
+.leaflet-container {
+  background: #111 !important;
+  /* Dark background before tiles load */
+  font-family: var(--font-sans) !important;
+}
+
+/* Ensure controls blend with glass theme */
+.leaflet-control-zoom {
+  border: 1px solid var(--color-border) !important;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1) !important;
+  border-radius: 8px !important;
+  overflow: hidden;
+  backdrop-filter: blur(8px);
+}
+
+.leaflet-control-zoom a {
+  background-color: var(--color-panel) !important;
+  color: var(--color-accent) !important;
+  border-bottom: 1px solid var(--color-border) !important;
+  transition: all 0.2s;
+}
+
+.leaflet-control-zoom a:hover {
+  background-color: var(--color-accent) !important;
+  color: #000 !important;
+}
+
+/* Customized Popup for Glass Theme */
+.leaflet-popup-content-wrapper,
+.leaflet-popup-tip {
+  background: rgba(10, 10, 10, 0.85) !important;
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--color-accent);
+  color: var(--color-text-primary) !important;
+  border-radius: 8px !important;
+}
+
+.leaflet-popup-close-button {
+  color: var(--color-accent) !important;
+}
