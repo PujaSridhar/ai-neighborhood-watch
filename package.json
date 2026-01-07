@@ -2,7 +2,7 @@
     "name": "ai-neighborhood-watch-root",
     "private": true,
     "scripts": {
-        "build": "cd frontend && npm install && npm run build",
+        "build": "cd frontend && npm install && npm run build && cd .. && rm -rf dist && cp -r frontend/dist dist",
         "dev": "echo 'Run api and frontend manually or install concurrently'"
     },
     "engines": {
